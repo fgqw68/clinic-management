@@ -1,0 +1,241 @@
+"""Visualizer utilities for generating charts and graphs for the clinic bot."""
+import io
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from typing import List, Dict, Any
+from datetime import datetime
+
+# Use non-interactive backend for server environments
+matplotlib.use('Agg')
+
+
+def generate_edc_annual_graph(edc_data: List[Dict[str, Any]], year: int) -> io.BytesIO:
+    """
+    Generate an annual EDC graph showing all expected delivery dates for a given year.
+
+    Args:
+        edc_data: List of dictionaries with 'patient_name' and 'edc_date' keys
+        year: The year for the EDC calendar (e.g., 2026)
+
+    Returns:
+        BytesIO object containing the PNG image of the graph
+    """
+    # Create a large figure with 12 subplots (one for each month)
+    fig, axes = plt.subplots(4, 3, figsize=(18, 12))
+    fig.suptitle(f'🤰 EDC Planner for {year} - KadeejaClinic', fontsize=16, fontweight='bold')
+
+    # Month names and their lengths
+    months = [
+        ('January', 31), ('February', 29 if year % 4 == 0 else 28),
+        ('March', 31), ('April', 30), ('May', 31), ('June', 30),
+        ('July', 31), ('August', 31), ('September', 30),
+        ('October', 31), ('November', 30), ('December', 31)
+    ]
+
+    # Group EDCs by month
+    edc_by_month = {i: [] for i in range(12)}  # 0-11 for January-December
+
+    for edc in edc_data:
+        edc_date = edc.get('edc_date')
+        patient_name = edc.get('patient_name', 'Unknown')
+
+        try:
+            edc_dt = datetime.strptime(edc_date, '%Y-%m-%d')
+            if edc_dt.year == year:
+                month_idx = edc_dt.month - 1
+                edc_by_month[month_idx].append({
+                    'name': patient_name,
+                    'date': edc_dt
+                })
+        except (ValueError, TypeError):
+            continue
+
+    # Generate each month subplot
+    for month_idx, (month_name, days_in_month) in enumerate(months):
+        row = month_idx // 3
+        col = month_idx % 3
+        ax = axes[row, col]
+
+        # Set up the axis
+        ax.set_xlim(0, days_in_month + 1)
+        ax.set_ylim(0, 10)
+        ax.set_xlabel('Day of Month', fontsize=8)
+        ax.set_ylabel('Patients', fontsize=8)
+        ax.set_title(f'{month_name}', fontsize=10, fontweight='bold')
+
+        # Add grid lines for each day
+        ax.set_xticks(range(1, days_in_month + 1, 5))
+        ax.set_xticks(range(1, days_in_month + 1), minor=True)
+        ax.grid(True, which='minor', alpha=0.2, linestyle='--')
+        ax.grid(True, which='major', alpha=0.3)
+
+        # Remove y-axis ticks (not needed)
+        ax.set_yticks([])
+
+        # Plot EDCs for this month
+        edcs_in_month = edc_by_month[month_idx]
+        if edcs_in_month:
+            # Group patients by date to handle overlaps
+            edcs_by_date = {}
+            for edc in edcs_in_month:
+                day = edc['date'].day
+                if day not in edcs_by_date:
+                    edcs_by_date[day] = []
+                edcs_by_date[day].append(edc['name'])
+
+            # Plot each date with stacked names
+            for day, patient_names in edcs_by_date.items():
+                y_position = 9  # Start from top
+
+                # Use soft colors based on day of month
+                color_idx = (day % 12)
+                colors = plt.cm.Pastel1(color_idx)
+
+                for idx, name in enumerate(patient_names):
+                    # Plot a marker for each patient
+                    ax.scatter(
+                        day, y_position - idx,
+                        s=300, c=[colors],
+                        edgecolors='black', linewidth=0.5,
+                        zorder=5
+                    )
+
+                    # Annotate with patient name
+                    ax.annotate(
+                        name,
+                        (day, y_position - idx),
+                        xytext=(5, 0),
+                        textcoords='offset points',
+                        fontsize=7,
+                        ha='left',
+                        va='center',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='none', alpha=0.8)
+                    )
+        else:
+            # No EDCs in this month
+            ax.text(
+                days_in_month / 2, 5,
+                'No EDCs',
+                ha='center', va='center',
+                fontsize=9, color='gray',
+                style='italic'
+            )
+
+    plt.tight_layout()
+
+    # Save to BytesIO
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+
+    return buf
+
+
+def generate_edc_horizontal_graph(edc_data: List[Dict[str, Any]], year: int) -> io.BytesIO:
+    """
+    Generate a horizontal timeline view of EDCs for the entire year.
+
+    Args:
+        edc_data: List of dictionaries with 'patient_name' and 'edc_date' keys
+        year: The year for the EDC calendar (e.g., 2026)
+
+    Returns:
+        BytesIO object containing the PNG image of the graph
+    """
+    # Create a single large horizontal plot
+    fig, ax = plt.subplots(figsize=(16, 10))
+    fig.suptitle(f'🤰 EDC Planner for {year} - KadeejaClinic', fontsize=16, fontweight='bold')
+
+    # Set up the axis for the entire year (365 days)
+    ax.set_xlim(0, 365)
+    ax.set_xlabel('Day of Year', fontsize=10)
+    ax.set_ylabel('Patient Name', fontsize=10)
+
+    # Calculate day of year for each EDC
+    edc_with_doy = []
+    for edc in edc_data:
+        edc_date = edc.get('edc_date')
+        patient_name = edc.get('patient_name', 'Unknown')
+
+        try:
+            edc_dt = datetime.strptime(edc_date, '%Y-%m-%d')
+            if edc_dt.year == year:
+                day_of_year = (edc_dt - datetime(year, 1, 1)).days + 1
+                edc_with_doy.append({
+                    'name': patient_name,
+                    'day': day_of_year,
+                    'date': edc_date
+                })
+        except (ValueError, TypeError):
+            continue
+
+    # Sort by day of year
+    edc_with_doy.sort(key=lambda x: x['day'])
+
+    # Plot each EDC
+    if edc_with_doy:
+        y_positions = range(len(edc_with_doy))
+        colors = plt.cm.Pastel1(range(len(edc_with_doy)))
+
+        for idx, edc in enumerate(edc_with_doy):
+            ax.scatter(
+                edc['day'], idx,
+                s=400, c=[colors[idx]],
+                edgecolors='black', linewidth=0.5,
+                zorder=5
+            )
+
+            # Annotate with patient name and date
+            label = f"{edc['name']} ({edc['date']})"
+            ax.annotate(
+                label,
+                (edc['day'], idx),
+                xytext=(10, 0),
+                textcoords='offset points',
+                fontsize=9,
+                ha='left',
+                va='center',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='none', alpha=0.8)
+            )
+
+        # Set y-ticks
+        ax.set_yticks(y_positions)
+        ax.set_yticklabels([edc['name'] for edc in edc_with_doy], fontsize=8)
+
+        # Add month markers
+        month_days = [0]
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        cumulative_days = 0
+        for month_idx in range(1, 12):
+            if month_idx in [1, 3, 5, 7, 8, 10, 12]:  # Months with 31 days
+                cumulative_days += 31
+            elif month_idx in [4, 6, 9, 11]:  # Months with 30 days
+                cumulative_days += 30
+            else:  # February
+                cumulative_days += 29 if year % 4 == 0 else 28
+            month_days.append(cumulative_days)
+
+        for month_idx, day in enumerate(month_days):
+            ax.axvline(x=day, color='gray', linestyle='--', alpha=0.3, linewidth=0.5)
+            if month_idx < 12:
+                ax.text(day + 15, len(edc_with_doy) - 0.5, month_names[month_idx],
+                       ha='center', va='top', fontsize=8, color='gray')
+
+        ax.set_xticks(month_days)
+    else:
+        ax.text(182.5, 0.5, 'No EDCs found for this year',
+               ha='center', va='center', fontsize=12, color='gray', style='italic')
+        ax.set_yticks([])
+
+    plt.tight_layout()
+
+    # Save to BytesIO
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+
+    return buf

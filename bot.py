@@ -202,10 +202,11 @@ def get_edc_check_keyboard(old_edc: str) -> InlineKeyboardMarkup:
     ])
 
 def get_today_keyboard() -> ReplyKeyboardMarkup:
-    """Get Today button keyboard."""
+    """Get Today button keyboard with actual dates."""
     today = datetime.now().strftime('%Y-%m-%d')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
     return ReplyKeyboardMarkup(
-        [['Today'], [today], ['Cancel']],
+        [[today], [yesterday], ['Cancel']],
         resize_keyboard=True,
         one_time_keyboard=True
     )
@@ -334,7 +335,7 @@ async def visit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     keyboard = get_today_keyboard()
     await update.message.reply_text(
         "📅 *New Visit Registration*\n\n"
-        "Please enter the visit date (YYYY-MM-DD format) or click 'Today':",
+        "Please enter the visit date (YYYY-MM-DD format) or select from the options below:",
         reply_markup=keyboard,
         parse_mode='Markdown'
     )
@@ -352,11 +353,8 @@ async def visit_date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             print(f"[DEBUG] User cancelled")
             return await cancel_conversation(update, context)
 
-        # Handle 'Today' button
-        if text == 'Today':
-            context.user_data['visit_date'] = datetime.now().strftime('%Y-%m-%d')
-            print(f"[DEBUG] Using today's date: {context.user_data['visit_date']}")
-        elif validate_date(text):
+        # Validate date input (keyboard shows actual dates)
+        if validate_date(text):
             # Validate that date is not in the future
             if not validate_date_not_future(text):
                 print(f"[DEBUG] Date is in the future: '{text}'")
@@ -370,7 +368,7 @@ async def visit_date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             print(f"[DEBUG] Invalid date format: '{text}'")
             await update.message.reply_text(
-                "❌ Invalid date format. Please use YYYY-MM-DD format or click 'Today':",
+                "❌ Invalid date format. Please use YYYY-MM-DD format:",
                 reply_markup=get_today_keyboard()
             )
             return VISIT_DATE
@@ -1171,14 +1169,12 @@ async def booking_date_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if text == 'Cancel':
         return await cancel_conversation(update, context)
 
-    # Handle 'Today' button
-    if text == 'Today':
-        context.user_data['booking_date'] = datetime.now().strftime('%Y-%m-%d')
-    elif validate_date(text):
+    # Validate date input (keyboard shows actual dates)
+    if validate_date(text):
         context.user_data['booking_date'] = text
     else:
         await update.message.reply_text(
-            "❌ Invalid date format. Please use YYYY-MM-DD format or click 'Today':",
+            "❌ Invalid date format. Please use YYYY-MM-DD format:",
             reply_markup=get_today_keyboard()
         )
         return BOOKING_DATE
