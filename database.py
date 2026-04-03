@@ -766,10 +766,17 @@ class DatabaseManager:
     # BOOKINGS TABLE OPERATIONS
     # ========================================
     @staticmethod
-    def fetch_todays_bookings() -> List[Dict[str, Any]]:
+    def fetch_bookings_by_date(target_date: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Fetch all bookings scheduled for today (IST timezone).
+        Fetch all bookings scheduled for a specific date (IST timezone).
+        If target_date is None, defaults to today's date.
         Returns bookings with patient_id joined from patients table.
+
+        Args:
+            target_date: Date string in YYYY-MM-DD format. If None, uses today's date.
+
+        Returns:
+            List of booking dictionaries with patient_id included
         """
         try:
             # Get current date in IST (UTC+5:30)
@@ -777,12 +784,17 @@ class DatabaseManager:
             ist_timezone = timezone(ist_offset)
             today_utc = datetime.now(timezone.utc)
             today_ist = today_utc.astimezone(ist_timezone)
-            today_str = today_ist.strftime('%Y-%m-%d')
 
-            # Query bookings for today's date with selective columns
+            # Use target_date if provided, otherwise use today
+            if target_date:
+                target_date_str = target_date
+            else:
+                target_date_str = today_ist.strftime('%Y-%m-%d')
+
+            # Query bookings for the target date with selective columns
             bookings_result = supabase.table('bookings')\
                 .select('patient_name', 'phone_number', 'planned_date', 'status', 'booked_by')\
-                .eq('planned_date', today_str)\
+                .eq('planned_date', target_date_str)\
                 .execute()
             bookings = bookings_result.data if bookings_result.data else []
 
@@ -804,8 +816,17 @@ class DatabaseManager:
             return result
 
         except Exception as e:
-            print(f"Database error in fetch_todays_bookings: {e}")
+            print(f"Database error in fetch_bookings_by_date: {e}")
             return []
+
+    @staticmethod
+    def fetch_todays_bookings() -> List[Dict[str, Any]]:
+        """
+        Fetch all bookings scheduled for today (IST timezone).
+        Returns bookings with patient_id joined from patients table.
+        (Legacy method - calls fetch_bookings_by_date with no date parameter)
+        """
+        return DatabaseManager.fetch_bookings_by_date()
 
     @staticmethod
     def upsert_booking(name: str, phone: str, planned_date: str, booked_by: str = 'Auto', status: str = '') -> Dict[str, Any]:

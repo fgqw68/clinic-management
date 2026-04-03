@@ -141,6 +141,10 @@ TRENDS_SELECT_YEAR = 90
 ATTRITION_TREND_SELECT_YEAR = 91
 VISIT_TREND_SELECT_YEAR = 92
 
+# Conversation states for View Bookings (VIEW_BOOKINGS_CONV)
+VIEW_BOOKINGS_DATE_SELECT = 95
+VIEW_BOOKINGS_CUSTOM_DATE = 96
+
 # ========================================
 # HELPER FUNCTIONS
 # ========================================
@@ -216,7 +220,7 @@ def get_admin_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             ['📝 Add Visit', '📅 Add Booking'],
-            ['🔍 Search Patient', '📅 Today\'s Bookings'],
+            ['🔍 Search Patient', '📅 View Bookings'],
             ['🤰 Pregnancy Registry', '📣 Assign Task'],
             ['📊 Trends'],
         ],
@@ -228,7 +232,7 @@ def get_staff_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             ['📝 Add Visit', '📅 Add Booking'],
-            ['🔍 Search Patient', '📅 Today\'s Bookings'],
+            ['🔍 Search Patient', '📅 View Bookings'],
             ['📞 Planned Patient Calls', '🧹 Unplanned Tasks'],
         ],
         resize_keyboard=True
@@ -241,6 +245,30 @@ def get_cancel_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=False  # Keep keyboard visible
     )
+
+
+def get_booking_date_picker_keyboard() -> InlineKeyboardMarkup:
+    """Get inline keyboard for date selection in View Bookings (Admin only)."""
+    # Calculate dates
+    ist_offset = timedelta(hours=5, minutes=30)
+    ist_timezone = timezone(ist_offset)
+    today_utc = datetime.now(timezone.utc)
+    today_ist = today_utc.astimezone(ist_timezone)
+
+    yesterday = today_ist - timedelta(days=1)
+    tomorrow = today_ist + timedelta(days=1)
+
+    # Format dates
+    today_str = today_ist.strftime('%Y-%m-%d')
+    yesterday_str = yesterday.strftime('%Y-%m-%d')
+    tomorrow_str = tomorrow.strftime('%Y-%m-%d')
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Today", callback_data=f'view_date_{today_str}')],
+        [InlineKeyboardButton("⬅️ Yesterday", callback_data=f'view_date_{yesterday_str}')],
+        [InlineKeyboardButton("➡️ Tomorrow", callback_data=f'view_date_{tomorrow_str}')],
+        [InlineKeyboardButton("✏️ Custom Date", callback_data='view_date_custom')]
+    ])
 
 # ========================================
 # ACCESS CONTROL DECORATOR
@@ -989,51 +1017,168 @@ async def search_phone_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # ========================================
 @authorized_only
 async def show_todays_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the Today's Bookings view for both Staff and Admin."""
+    """Handle the Today's Bookings view with role-based date filtering."""
     try:
-        # Get current date in IST (UTC+5:30)
-        ist_offset = timedelta(hours=5, minutes=30)
-        ist_timezone = timezone(ist_offset)
-        today_utc = datetime.now(timezone.utc)
-        today_ist = today_utc.astimezone(ist_timezone)
-        today_str = today_ist.strftime('%Y-%m-%d')
-        today_display = today_ist.strftime('%d %B %Y')
+        chat_id = update.effective_chat.id
+        role = get_user_role(chat_id)
 
-        # Fetch today's bookings
-        bookings = DatabaseManager.fetch_todays_bookings()
+        # Staff Role: Show only today's bookings (restricted view)
+        if role == 'staff':
+            # Get current date in IST (UTC+5:30)
+            ist_offset = timedelta(hours=5, minutes=30)
+            ist_timezone = timezone(ist_offset)
+            today_utc = datetime.now(timezone.utc)
+            today_ist = today_utc.astimezone(ist_timezone)
+            today_str = today_ist.strftime('%Y-%m-%d')
+            today_display = today_ist.strftime('%d %B %Y')
 
-        if not bookings:
-            message = (
-                f"📅 *Today's Bookings ({today_display})*\n\n"
-                f"📭 No bookings scheduled for today.\n\n"
-                f"Use /start to return to the main menu."
-            )
+            # Fetch today's bookings
+            bookings = DatabaseManager.fetch_bookings_by_date(today_str)
+
+            if not bookings:
+                message = (
+                    f"📅 *Today's Bookings ({today_display})*\n\n"
+                    f"📭 No bookings scheduled for today.\n\n"
+                    f"Use /start to return to the main menu."
+                )
+                await update.message.reply_text(message, parse_mode='Markdown')
+                return
+
+            # Display bookings
+            message = f"📅 *Today's Bookings ({today_display})*\n\n"
+            message += f"📋 Total Appointments: {len(bookings)}\n\n"
+
+            for idx, booking in enumerate(bookings, 1):
+                patient_name = booking.get('patient_name', 'N/A')
+                phone_number = booking.get('phone_number', 'N/A')
+                patient_id = booking.get('patient_id', 'N/A')
+                planned_date = booking.get('planned_date', 'N/A')
+
+                message += f"*{idx}. {patient_name}*\n"
+                message += f"   📱 Phone: {phone_number}\n"
+                message += f"   🏥 Patient ID: {patient_id if patient_id != 'N/A' else 'Not set'}\n"
+                message += f"   📅 Date: {format_date(planned_date) if planned_date != 'N/A' else 'N/A'}\n\n"
+
+            message += f"Use /start to return to the main menu."
             await update.message.reply_text(message, parse_mode='Markdown')
-            return
 
-        # Display bookings
-        message = f"📅 *Today's Bookings ({today_display})*\n\n"
-        message += f"📋 Total Appointments: {len(bookings)}\n\n"
+        # Admin Role: Show date picker for custom date selection
+        elif role == 'admin':
+            # Get current date in IST (UTC+5:30)
+            ist_offset = timedelta(hours=5, minutes=30)
+            ist_timezone = timezone(ist_offset)
+            today_utc = datetime.now(timezone.utc)
+            today_ist = today_utc.astimezone(ist_timezone)
+            today_str = today_ist.strftime('%Y-%m-%d')
+            today_display = today_ist.strftime('%d %B %Y')
 
-        for idx, booking in enumerate(bookings, 1):
-            patient_name = booking.get('patient_name', 'N/A')
-            phone_number = booking.get('phone_number', 'N/A')
-            patient_id = booking.get('patient_id', 'N/A')
-            planned_date = booking.get('planned_date', 'N/A')
+            # Store today's date in context for default display
+            context.user_data['selected_booking_date'] = today_str
 
-            message += f"*{idx}. {patient_name}*\n"
-            message += f"   📱 Phone: {phone_number}\n"
-            message += f"   🏥 Patient ID: {patient_id if patient_id != 'N/A' else 'Not set'}\n"
-            message += f"   📅 Date: {format_date(planned_date) if planned_date != 'N/A' else 'N/A'}\n\n"
-
-        message += f"Use /start to return to the main menu."
-        await update.message.reply_text(message, parse_mode='Markdown')
+            message = (
+                f"📅 *View Bookings - Admin Dashboard*\n\n"
+                f"Select a date to view bookings:\n\n"
+                f"Default: {today_display} (Today)"
+            )
+            await update.message.reply_text(
+                message,
+                reply_markup=get_booking_date_picker_keyboard(),
+                parse_mode='Markdown'
+            )
 
     except Exception as e:
         print(f"Database error: {e}")
         await update.message.reply_text(
-            "❌ Error fetching today's bookings. Please try again or contact support."
+            "❌ Error fetching bookings. Please try again or contact support."
         )
+
+
+async def view_bookings_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle date selection from the booking date picker inline keyboard."""
+    query = update.callback_query
+    await query.answer()
+
+    callback_data = query.data
+
+    if callback_data == 'view_date_custom':
+        # Ask user to enter custom date
+        await query.message.edit_text(
+            "📅 *Enter Custom Date*\n\n"
+            "Please enter the date in YYYY-MM-DD format:",
+            parse_mode='Markdown'
+        )
+        # Store conversation state
+        context.user_data['conversation'] = 'view_bookings_custom_date'
+        return
+
+    # Extract date from callback data (format: view_date_YYYY-MM-DD)
+    if callback_data.startswith('view_date_'):
+        selected_date = callback_data[len('view_date_'):]
+        context.user_data['selected_booking_date'] = selected_date
+
+        # Display bookings for selected date
+        await display_bookings_for_date(update, context, selected_date)
+
+
+async def display_bookings_for_date(update: Update, context: ContextTypes.DEFAULT_TYPE, date_str: str) -> None:
+    """Display bookings for a specific date with navigation options."""
+    try:
+        # Format date for display
+        dt = datetime.strptime(date_str, '%Y-%m-%d')
+        date_display = dt.strftime('%d %B %Y')
+
+        # Fetch bookings for the selected date
+        bookings = DatabaseManager.fetch_bookings_by_date(date_str)
+
+        # Build message
+        message = f"📅 *Bookings for {date_display}*\n\n"
+
+        if not bookings:
+            message += "📭 No bookings scheduled for this date.\n\n"
+        else:
+            message += f"📋 Total Appointments: {len(bookings)}\n\n"
+
+            for idx, booking in enumerate(bookings, 1):
+                patient_name = booking.get('patient_name', 'N/A')
+                phone_number = booking.get('phone_number', 'N/A')
+                patient_id = booking.get('patient_id', 'N/A')
+                planned_date = booking.get('planned_date', 'N/A')
+                status = booking.get('status', 'N/A')
+
+                message += f"*{idx}. {patient_name}*\n"
+                message += f"   📱 Phone: {phone_number}\n"
+                message += f"   🏥 Patient ID: {patient_id if patient_id != 'N/A' else 'Not set'}\n"
+                message += f"   📅 Date: {format_date(planned_date) if planned_date != 'N/A' else 'N/A'}\n"
+                if status and status != 'N/A':
+                    message += f"   ✅ Status: {status}\n"
+                message += "\n"
+
+        # Add navigation options
+        message += "📝 *Navigation Options*\n\n"
+        message += "Select another date or return to main menu."
+
+        # Edit message with date picker
+        if update.callback_query:
+            await update.callback_query.message.edit_text(
+                message,
+                reply_markup=get_booking_date_picker_keyboard(),
+                parse_mode='Markdown'
+            )
+        else:
+            # For custom date input (text message)
+            await update.message.reply_text(
+                message,
+                reply_markup=get_booking_date_picker_keyboard(),
+                parse_mode='Markdown'
+            )
+
+    except Exception as e:
+        print(f"Error displaying bookings: {e}")
+        error_message = "❌ Error fetching bookings. Please try again."
+        if update.callback_query:
+            await update.callback_query.message.edit_text(error_message)
+        else:
+            await update.message.reply_text(error_message)
 
 # ========================================
 # MANUAL BOOKING CONVERSATION HANDLER
@@ -2230,6 +2375,20 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         await handle_admin_task_data_report(update, context)
         return
 
+    # Check if user is entering custom date for view bookings (Admin only)
+    if context.user_data.get('conversation') == 'view_bookings_custom_date':
+        # Validate date format
+        if validate_date(text):
+            selected_date = text
+            context.user_data.pop('conversation', None)
+            await display_bookings_for_date(update, context, selected_date)
+        else:
+            await update.message.reply_text(
+                "❌ Invalid date format. Please use YYYY-MM-DD format (e.g., 2026-04-03):",
+                parse_mode='Markdown'
+            )
+        return
+
     if text == '🤰 Pregnancy Registry':
         await show_pregnancy_registry(update, context)
     elif text == '📊 Trends':
@@ -2238,7 +2397,7 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         await show_tasks(update, context, task_view='planned')
     elif text == '🧹 Unplanned Tasks':
         await show_tasks(update, context, task_view='unplanned')
-    elif text == '📅 Today\'s Bookings':
+    elif text == '📅 View Bookings':
         await show_todays_bookings(update, context)
     else:
         await update.message.reply_text(
@@ -2571,6 +2730,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             "❌ Operation cancelled.\n\n"
             "Use /start to return to the main menu."
         )
+
+    # ========================================
+    # VIEW BOOKINGS DATE CALLBACKS (ADMIN ONLY)
+    # ========================================
+    elif callback_data.startswith('view_date_') or callback_data == 'view_date_custom':
+        # Handle date selection for view bookings (Admin only)
+        if role == 'admin':
+            await view_bookings_date_callback(update, context)
 
 # ========================================
 # TASK CLEANUP CONVERSATION (CLEANUP_CONV)
