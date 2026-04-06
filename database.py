@@ -1097,6 +1097,13 @@ class DatabaseManager:
 
             for staff in staff_list:
                 staff_name = staff.get('staff_name')
+                staff_role = staff.get('role')
+
+                # Skip admin staff - tasks are only for regular staff members
+                if staff_role == 'admin':
+                    print(f"[DEBUG create_daily_admin_chores] Skipping admin: {staff_name}")
+                    continue
+
                 if not staff_name:
                     continue
 
@@ -1557,8 +1564,7 @@ class DatabaseManager:
 
         LOGIC:
         - Query bookings table for records where planned_date matches (Today + target_days)
-          - For target_days = 0: exact match on booked_by = 'Auto'
-          - For target_days > 0: case-insensitive match on booked_by containing 'Auto'
+        - Fetches ALL records for the target date, regardless of booked_by
         - Check if a Pending task already exists with same (patient_name, phone_number, followup_type)
         - If not exists, insert new task assigned to Nimisha with due_date = Today
 
@@ -1584,18 +1590,10 @@ class DatabaseManager:
 
             print(f"[DEBUG sync_bookings_to_tasks] target_days={target_days}, target_date={target_date_str}, today={today_str}")
 
-            # Query bookings for the target date, only for automated bookings
-            # For target_days = 0 (today), use exact match for booked_by = 'Auto'
-            if target_days == 0:
-                bookings_result = supabase.table('bookings').select('*')\
-                    .eq('planned_date', target_date_str)\
-                    .eq('booked_by', 'Auto')\
-                    .execute()
-            else:
-                bookings_result = supabase.table('bookings').select('*')\
-                    .eq('planned_date', target_date_str)\
-                    .ilike('booked_by', 'Auto')\
-                    .execute()
+            # Query bookings for the target date (ALL records, regardless of booked_by)
+            bookings_result = supabase.table('bookings').select('*')\
+                .eq('planned_date', target_date_str)\
+                .execute()
             bookings = bookings_result.data if bookings_result.data else []
 
             print(f"[DEBUG sync_bookings_to_tasks] Found {len(bookings)} bookings for {target_date_str}")

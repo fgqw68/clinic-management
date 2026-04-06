@@ -113,6 +113,10 @@ BOOKING_NAME = 33
 BOOKING_PHONE = 34
 BOOKING_DATE = 35
 BOOKING_CONFIRM_CHANGE = 36
+BOOKING_SUNDAY_CONFIRM = 37
+
+# Conversation states for Sunday handling
+NEXT_VISIT_SUNDAY_CONFIRM = 38
 
 # Conversation states for Search
 SEARCH_NAME = 60
@@ -744,6 +748,34 @@ async def next_visit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return NEXT_VISIT
 
+        # Check if the selected date is a Sunday (only if a date was provided)
+        if next_visit_date:
+            try:
+                visit_dt = datetime.strptime(next_visit_date, '%Y-%m-%d')
+                if visit_dt.weekday() == 6:  # Sunday (weekday 6)
+                    # Calculate next Monday (add 1 day to Sunday)
+                    monday_date = visit_dt + timedelta(days=1)
+                    monday_str = monday_date.strftime('%Y-%m-%d')
+
+                    # Store the original date in case user wants to choose different one
+                    context.user_data['sunday_next_visit_date'] = next_visit_date
+
+                    # Show Sunday warning with inline keyboard
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(f"Move to Monday ({format_date(monday_str)})", callback_data=f"visit_monday|{monday_str}"),
+                            InlineKeyboardButton("Enter a different date", callback_data="visit_newdate")
+                        ]
+                    ])
+
+                    await update.message.reply_text(
+                        f"⚠️ The selected date {format_date(next_visit_date)} falls on a Sunday.",
+                        reply_markup=keyboard
+                    )
+                    return NEXT_VISIT_SUNDAY_CONFIRM
+            except ValueError:
+                pass
+
         context.user_data['next_visit_date'] = next_visit_date
 
         # ========================================
@@ -1324,10 +1356,34 @@ async def booking_date_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return BOOKING_DATE
 
+    # Check if the selected date is a Sunday
+    booking_date = context.user_data.get('booking_date')
+    try:
+        booking_dt = datetime.strptime(booking_date, '%Y-%m-%d')
+        if booking_dt.weekday() == 6:  # Sunday (weekday 6)
+            # Calculate next Monday (add 1 day to Sunday)
+            monday_date = booking_dt + timedelta(days=1)
+            monday_str = monday_date.strftime('%Y-%m-%d')
+
+            # Show Sunday warning with inline keyboard
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(f"Move to Monday ({format_date(monday_str)})", callback_data=f"booking_monday|{monday_str}"),
+                    InlineKeyboardButton("Enter a different date", callback_data="booking_newdate")
+                ]
+            ])
+
+            await update.message.reply_text(
+                f"⚠️ The selected date {format_date(booking_date)} falls on a Sunday.",
+                reply_markup=keyboard
+            )
+            return BOOKING_SUNDAY_CONFIRM
+    except ValueError:
+        pass
+
     # Get booking details
     name = context.user_data.get('name')
     phone = context.user_data.get('phone')
-    booking_date = context.user_data.get('booking_date')
 
     # Get the staff member's name who is creating this booking
     chat_id = update.effective_chat.id
@@ -1521,13 +1577,26 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, task_vi
                         call_callback = f"call|{idx}|{patient}|{phone}|{task_type}|{assignee}"
                         complete_callback = f"complete|{idx}|{patient}|{phone}|{task_type}|{assignee}"
 
-                        # Send task with inline buttons
+                        # Calculate Next Visit Date based on task type
+                        next_visit_date = None
+                        if task_type == '0-Day Reminder' and due != 'N/A':
+                            next_visit_date = format_date(due)
+                        elif task_type == '3-Day Reminder' and due != 'N/A':
+                            next_visit_dt = datetime.strptime(due, '%Y-%m-%d') + timedelta(days=3)
+                            next_visit_date = format_date(next_visit_dt.strftime('%Y-%m-%d'))
+                        elif task_type == '14-Day Reminder' and due != 'N/A':
+                            next_visit_dt = datetime.strptime(due, '%Y-%m-%d') + timedelta(days=14)
+                            next_visit_date = format_date(next_visit_dt.strftime('%Y-%m-%d'))
+
+                        # Build task message with Next Visit Date if applicable
                         task_message = (
                             f"{priority_icon} *{idx}. {patient}*\n"
                             f"📱 {phone}\n"
                             f"📋 {task_type}\n"
-                            f"📅 Due: {format_date(due) if due != 'N/A' else 'No due date'}"
                         )
+                        if next_visit_date:
+                            task_message += f"📅 Next Visit: {next_visit_date}\n"
+                        task_message += f"📅 Due: {format_date(due) if due != 'N/A' else 'No due date'}"
 
                         keyboard = InlineKeyboardMarkup([
                             [
@@ -2630,6 +2699,194 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             # Set conversation state for booking date input
             context.user_data['conversation'] = 'booking_input'
 
+        # SUNDAY HANDLERS FOR BOOKING
+        elif callback_data.startswith('booking_monday|'):
+            # Move booking to Monday
+            parts = callback_data.split('|')
+            monday_date = parts[1]
+            context.user_data['booking_date'] = monday_date
+
+            # Continue with booking creation
+            name = context.user_data.get('name')
+            phone = context.user_data.get('phone')
+            booking_date = monday_date
+
+            # Get the staff member's name who is creating this booking
+            chat_id = query.message.chat_id
+            booked_by = get_user_name(chat_id)
+
+            try:
+                # Upsert the booking
+                booking = DatabaseManager.upsert_booking(name, phone, booking_date, booked_by)
+
+                if booking:
+                    is_update = 'existing_booking' in context.user_data
+
+                    # If booking is for today, create a task for confirming availability
+                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    if booking_date == today_str and not is_update:
+                        # Create "0-Day Reminder" task for Nimisha
+                        DatabaseManager.create_patient_task(
+                            assignee='Nimisha',
+                            name=name,
+                            phone=phone,
+                            followup_type='0-Day Reminder',
+                            status='Pending',
+                            due_date=today_str
+                        )
+
+                    if is_update:
+                        success_message = (
+                            f"✅ *Booking Updated Successfully!*\n\n"
+                            f"👤 Patient: {name}\n"
+                            f"📱 Phone: {phone}\n"
+                            f"📅 New Date: {format_date(booking_date)}\n\n"
+                            f"📍 Use /start to return to main menu"
+                        )
+                    else:
+                        success_message = (
+                            f"✅ *Booking Created Successfully!*\n\n"
+                            f"👤 Patient: {name}\n"
+                            f"📱 Phone: {phone}\n"
+                            f"📅 Booking Date: {format_date(booking_date)}\n"
+                            f"👤 Booked by: {booked_by}\n\n"
+                            f"📍 Use /start to return to main menu"
+                        )
+
+                    # Show appropriate menu based on user role
+                    role = get_user_role(chat_id)
+                    keyboard = get_admin_menu_keyboard() if role == 'admin' else get_staff_menu_keyboard()
+
+                    await query.message.reply_text(success_message, parse_mode='Markdown', reply_markup=keyboard)
+                else:
+                    await query.message.reply_text(
+                        "❌ Failed to create booking. Please try again.",
+                        reply_markup=get_admin_menu_keyboard() if role == 'admin' else get_staff_menu_keyboard()
+                    )
+
+                context.user_data.clear()
+            except Exception as e:
+                print(f"Error in booking_monday callback: {e}")
+                await query.message.reply_text(
+                    "❌ An error occurred. Please try again.",
+                    reply_markup=get_admin_menu_keyboard() if role == 'admin' else get_staff_menu_keyboard()
+                )
+
+        elif callback_data == 'booking_newdate':
+            # Prompt user to enter a different date
+            name = context.user_data.get('name')
+            phone = context.user_data.get('phone')
+
+            await query.message.reply_text(
+                f"👤 Patient Name: {name}\n"
+                f"📱 Phone: {phone}\n\n"
+                f"📅 Please enter a different booking date (YYYY-MM-DD format):",
+                reply_markup=get_today_keyboard()
+            )
+            # Stay in BOOKING_DATE state to handle new date input
+
+    # SUNDAY HANDLERS FOR VISIT
+    elif callback_data.startswith('visit_monday|'):
+        # Move visit to Monday
+        parts = callback_data.split('|')
+        monday_date = parts[1]
+        context.user_data['next_visit_date'] = monday_date
+
+        # Continue with visit saving
+        name = context.user_data.get('name')
+        phone = context.user_data.get('phone')
+        visit_date = context.user_data.get('visit_date')
+        patient_id = context.user_data.get('patient_id')
+        is_pregnancy = context.user_data.get('is_pregnancy')
+        edc = context.user_data.get('edc')
+        gravida = context.user_data.get('gravida')
+        notes = context.user_data.get('notes')
+        next_visit_date = monday_date
+
+        # Get the current user's name for task assignment
+        chat_id = query.message.chat_id
+        current_user_name = get_user_name(chat_id)
+
+        # Check if patient exists - if not, we'll create them
+        existing_patient = DatabaseManager.fetch_patient(name, phone)
+        is_new_patient = not existing_patient
+
+        # 1. Patients: Create/update patient record with notes, patient_id, and last_visit_date
+        # upsert_patient will create a new patient if they don't exist
+        DatabaseManager.prepend_patient_notes(name, phone, notes, visit_date)
+        DatabaseManager.upsert_patient(name, phone, patient_id=patient_id, last_visit=visit_date)
+
+        # 2. Visits: Insert clinical record with gravida_status
+        DatabaseManager.insert_visit(
+            name, phone, visit_date, is_pregnancy,
+            remarks=notes,
+            next_visit_date=next_visit_date,
+            gravida_status=gravida
+        )
+
+        # 2.5. Bookings: Mark current booking as visited
+        DatabaseManager.mark_booking_visited(name, phone)
+
+        # 3. Pregnancy Registry: UPSERT EDC date with gravida_status
+        edc_display = "N/A"
+        gravida_display = "N/A"
+        if is_pregnancy and edc:
+            DatabaseManager.upsert_pregnancy_registry(
+                name, phone, edc, gravida_status=gravida, status='Active'
+            )
+            edc_display = format_date(edc)
+            gravida_display = gravida
+
+        # 4. Bookings: Update bookings table if next visit is provided
+        if next_visit_date:
+            DatabaseManager.upsert_booking(name, phone, next_visit_date)
+
+        # 5. Tasks: Create '3-Day Feedback' task for the current user (dynamic assignee)
+        three_day_due = DatabaseManager.calculate_due_date(visit_date, 3)
+        DatabaseManager.create_patient_task(
+            assignee=current_user_name,
+            name=name,
+            phone=phone,
+            followup_type='3-Day Feedback',
+            status='Pending',
+            due_date=three_day_due
+        )
+
+        # Success Message
+        success_message = (
+            f"✅ *Visit Recorded Successfully!*\n\n"
+            f"👤 Patient: {name}\n"
+            f"📱 Phone: {phone}\n"
+            f"🏥 Patient ID: {patient_id}\n"
+            f"📅 Visit Date: {format_date(visit_date)}\n"
+            f"🤰 Pregnancy: {'Yes' if is_pregnancy else 'No'}\n"
+        )
+        if is_pregnancy and edc:
+            success_message += f"👶 Gravida: {gravida_display}\n"
+            success_message += f"📅 EDC: {edc_display}\n"
+        success_message += f"📝 Notes: {notes}\n"
+        success_message += f"📅 Next Visit: {format_date(next_visit_date)}\n"
+        if is_new_patient:
+            success_message += f"\n🆕 *New patient added to the patient table*\n"
+        success_message += f"\n📋 Task Created for {current_user_name} (3-Day Feedback)\n"
+        success_message += f"📅 Task Due: {format_date(three_day_due)}\n"
+        success_message += f"\n📍 Use /start to return to main menu"
+
+        # Show appropriate menu based on user role
+        role = get_user_role(chat_id)
+        keyboard = get_admin_menu_keyboard() if role == 'admin' else get_staff_menu_keyboard()
+
+        await query.message.reply_text(success_message, parse_mode='Markdown', reply_markup=keyboard)
+        context.user_data.clear()
+
+    elif callback_data == 'visit_newdate':
+        # Prompt user to enter a different date for next visit
+        await query.message.reply_text(
+            "📅 Please enter a different next visit date (YYYY-MM-DD format) or type 'none':",
+            reply_markup=ReplyKeyboardMarkup([['Today'], ['Cancel']], resize_keyboard=True, one_time_keyboard=True)
+        )
+        # Stay in NEXT_VISIT state to handle new date input
+
     # ========================================
     # ADMIN STATUS SYNC CALLBACKS
     # ========================================
@@ -3546,6 +3803,7 @@ def main():
             EDC_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, edc_confirm_handler)],
             NOTES: [MessageHandler(filters.TEXT & ~filters.COMMAND, notes_handler)],
             NEXT_VISIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, next_visit_handler)],
+            NEXT_VISIT_SUNDAY_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, next_visit_handler)],
         },
         fallbacks=[CommandHandler('cancel', cancel_conversation)],
         conversation_timeout=timedelta(minutes=30),
@@ -3628,6 +3886,7 @@ def main():
             BOOKING_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, booking_phone_handler)],
             BOOKING_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, booking_date_handler)],
             BOOKING_CONFIRM_CHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, booking_confirm_change_handler)],
+            BOOKING_SUNDAY_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, booking_date_handler)],
         },
         fallbacks=[CommandHandler('cancel', cancel_conversation)],
         conversation_timeout=timedelta(minutes=15),
