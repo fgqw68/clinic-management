@@ -1556,12 +1556,23 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, task_vi
             if task_view in ('planned', None):
                 if pending_tasks_sorted:
                     message += "📞 *Planned Patient Calls:*\n\n"
+                    # Store tasks in context.user_data for callback handling
+                    context.user_data['tasks'] = {}
                     for idx, task in enumerate(pending_tasks_sorted, 1):
                         patient = task.get('patient_name', 'N/A')
                         phone = task.get('phone_number', 'N/A')
                         task_type = task.get('followup_type', 'N/A')
                         due = task.get('due_date', 'N/A')
                         assignee = task.get('assignee', 'N/A')
+
+                        # Store task details in context.user_data for callback handling
+                        context.user_data['tasks'][str(idx)] = {
+                            'patient_name': patient,
+                            'phone': phone,
+                            'task_type': task_type,
+                            'assignee': assignee,
+                            'due_date': due
+                        }
 
                         # Get priority icon based on task type
                         priority_icons = {
@@ -1573,9 +1584,9 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, task_vi
                         }
                         priority_icon = priority_icons.get(task_type, "⚪")
 
-                        # Create callback data for buttons (use pipe as delimiter to handle spaces)
-                        call_callback = f"call|{idx}|{patient}|{phone}|{task_type}|{assignee}"
-                        complete_callback = f"complete|{idx}|{patient}|{phone}|{task_type}|{assignee}"
+                        # Create short callback data for buttons (Telegram limit: 64 bytes)
+                        call_callback = f"call|{idx}"
+                        complete_callback = f"complete|{idx}"
 
                         # Calculate Next Visit Date based on task type
                         next_visit_date = None
@@ -2497,10 +2508,17 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         parts = callback_data.split('|')
         print(f"[DEBUG handle_callback_query] Call Now parts: {parts}")
         idx = parts[1]
-        patient_name = parts[2]
-        phone = parts[3]
-        task_type = parts[4]
-        assignee = parts[5]
+
+        # Retrieve task details from context.user_data
+        task_info = context.user_data.get('tasks', {}).get(idx)
+        if not task_info:
+            await query.edit_message_text("❌ Task not found. Please try /tasks again.")
+            return
+
+        patient_name = task_info['patient_name']
+        phone = task_info['phone']
+        task_type = task_info['task_type']
+        assignee = task_info['assignee']
 
         # Show call prompt with patient info
         call_message = (
@@ -2517,10 +2535,17 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         parts = callback_data.split('|')
         print(f"[DEBUG handle_callback_query] Complete parts: {parts}")
         idx = parts[1]
-        patient_name = parts[2]
-        phone = parts[3]
-        task_type = parts[4]
-        assignee = parts[5]
+
+        # Retrieve task details from context.user_data
+        task_info = context.user_data.get('tasks', {}).get(idx)
+        if not task_info:
+            await query.edit_message_text("❌ Task not found. Please try /tasks again.")
+            return
+
+        patient_name = task_info['patient_name']
+        phone = task_info['phone']
+        task_type = task_info['task_type']
+        assignee = task_info['assignee']
 
         # Store task info for the booking verification flow
         context.user_data['task_info'] = {
