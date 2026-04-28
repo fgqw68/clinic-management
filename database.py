@@ -1035,18 +1035,18 @@ class DatabaseManager:
                 .execute()
             result['pending_no_visit_tasks'] = no_visit_tasks_result.data if no_visit_tasks_result.data else []
 
-            # Check existing Pending Today Reminder tasks (any assignee)
-            today_reminder_result = supabase.table('patient_tasks').select('*')\
-                .ilike('followup_type', '0-Day Reminder')\
+            # Check existing Pending 1-Day Reminder tasks (any assignee)
+            oneday_reminder_result = supabase.table('patient_tasks').select('*')\
+                .ilike('followup_type', '1-Day Reminder')\
                 .eq('status', 'Pending')\
                 .execute()
-            result['pending_today_reminders'] = today_reminder_result.data if today_reminder_result.data else []
+            result['pending_today_reminders'] = oneday_reminder_result.data if oneday_reminder_result.data else []
 
             print(f"[DEBUG] Today's bookings with booked_by='Auto': {len(result['bookings_today_auto'])}")
             print(f"[DEBUG] Today's bookings with other booked_by: {len(result['bookings_today_other'])}")
             print(f"[DEBUG] Missed bookings (status != Visited): {len(result['bookings_missed'])}")
             print(f"[DEBUG] Pending No Visit tasks: {len(result['pending_no_visit_tasks'])}")
-            print(f"[DEBUG] Pending Today Reminder tasks: {len(result['pending_today_reminders'])}")
+            print(f"[DEBUG] Pending 1-Day Reminder tasks: {len(result['pending_today_reminders'])}")
 
         except Exception as e:
             print(f"Error in debug_sync_state: {e}")
@@ -1558,19 +1558,16 @@ class DatabaseManager:
         return due_dt.strftime('%Y-%m-%d')
 
     @staticmethod
-    def sync_bookings_to_tasks(target_days: int, task_label: str) -> Dict[str, Any]:
+    def sync_bookings_to_1day_tasks() -> Dict[str, Any]:
         """
-        Sync bookings to patient tasks for automation.
+        Sync bookings to 1-Day Reminder patient tasks for automation.
 
         LOGIC:
-        - Query bookings table for records where planned_date matches (Today + target_days)
+        - Query bookings table for records where planned_date = Today + 1
+        - If Today + 1 is Sunday (weekday 6), use Today + 2 (Saturday) instead
         - Fetches ALL records for the target date, regardless of booked_by
         - Check if a Pending task already exists with same (patient_name, phone_number, followup_type)
-        - If not exists, insert new task assigned to Nimisha with due_date = Today
-
-        Args:
-            target_days: Days from today to sync (0 = today, 3 = 3 days from now, 14 = 14 days from now)
-            task_label: The followup_type label for the task (e.g., "0-Day Reminder", "3-Day Reminder", "14-Day Reminder", "No Visit")
+        - If not exists, insert new task assigned to current user with due_date = Today
 
         Returns:
             Dict with sync results: {'tasks_created': int, 'tasks_skipped': int, 'errors': list}
@@ -1584,19 +1581,24 @@ class DatabaseManager:
         try:
             # Calculate target date (using UTC to ensure consistent date calculation)
             today = datetime.now(timezone.utc).astimezone()
-            target_date = today + timedelta(days=target_days)
-            target_date_str = target_date.strftime('%Y-%m-%d')
             today_str = today.strftime('%Y-%m-%d')
 
-            print(f"[DEBUG sync_bookings_to_tasks] target_days={target_days}, target_date={target_date_str}, today={today_str}")
+            # Calculate reminder date (planned_date - 1 day)
+            # If reminder date is Sunday, use planned_date - 2 (Saturday)
+            reminder_date = today + timedelta(days=1)
+            if reminder_date.weekday() == 6:  # Sunday is 6
+                reminder_date = today + timedelta(days=2)
+            reminder_date_str = reminder_date.strftime('%Y-%m-%d')
 
-            # Query bookings for the target date (ALL records, regardless of booked_by)
+            print(f"[DEBUG sync_bookings_to_1day_tasks] today={today_str}, reminder_date={reminder_date_str}")
+
+            # Query bookings for the reminder date (ALL records, regardless of booked_by)
             bookings_result = supabase.table('bookings').select('*')\
-                .eq('planned_date', target_date_str)\
+                .eq('planned_date', reminder_date_str)\
                 .execute()
             bookings = bookings_result.data if bookings_result.data else []
 
-            print(f"[DEBUG sync_bookings_to_tasks] Found {len(bookings)} bookings for {target_date_str}")
+            print(f"[DEBUG sync_bookings_to_1day_tasks] Found {len(bookings)} bookings for {reminder_date_str}")
 
             for booking in bookings:
                 patient_name = booking.get('patient_name')
@@ -1604,7 +1606,7 @@ class DatabaseManager:
                 booked_by = booking.get('booked_by')
                 planned_date = booking.get('planned_date')
 
-                print(f"[DEBUG sync_bookings_to_tasks] Processing booking: {patient_name}, {phone_number}, booked_by={booked_by}, planned_date={planned_date}")
+                print(f"[DEBUG sync_bookings_to_1day_tasks] Processing booking: {patient_name}, {phone_number}, booked_by={booked_by}, planned_date={planned_date}")
 
                 try:
                     # Check if patient exists in patients table (foreign key constraint)
@@ -1615,7 +1617,7 @@ class DatabaseManager:
 
                     if not patient_check.data:
                         # Patient doesn't exist, skip creating task
-                        print(f"[DEBUG sync_bookings_to_tasks] Skipping {patient_name}: Patient not found in patients table")
+                        print(f"[DEBUG sync_bookings_to_1day_tasks] Skipping {patient_name}: Patient not found in patients table")
                         result['tasks_skipped'] += 1
                         continue
 
@@ -1624,29 +1626,32 @@ class DatabaseManager:
                     existing_task = supabase.table('patient_tasks').select('*')\
                         .ilike('patient_name', patient_name)\
                         .ilike('phone_number', phone_number)\
-                        .ilike('followup_type', task_label)\
+                        .ilike('followup_type', '1-Day Reminder')\
                         .eq('status', 'Pending')\
                         .execute()
 
                     if existing_task.data:
                         # Pending task already exists, skip
-                        print(f"[DEBUG sync_bookings_to_tasks] Skipping {patient_name}: Pending task already exists")
+                        print(f"[DEBUG sync_bookings_to_1day_tasks] Skipping {patient_name}: Pending task already exists")
                         result['tasks_skipped'] += 1
                     else:
-                        # Create new task
-                        # Default assignee can be configured or fetched from database
+                        # Create new task assigned to current user (not hardcoded)
+                        # Get active staff mapping to find assignee
+                        staff_mapping = DatabaseManager.get_active_staff_mapping()
+                        assignee = staff_mapping.get(booked_by) if booked_by in staff_mapping else 'Nimisha'
+
                         task_data = {
-                            'assignee': 'Nimisha',  # TODO: Make configurable via env var or database
+                            'assignee': assignee,
                             'patient_name': patient_name,
                             'phone_number': phone_number,
-                            'followup_type': task_label,
+                            'followup_type': '1-Day Reminder',
                             'status': 'Pending',
                             'due_date': today_str
                         }
 
                         supabase.table('patient_tasks').insert(task_data).execute()
                         result['tasks_created'] += 1
-                        print(f"[DEBUG sync_bookings_to_tasks] Created task for {patient_name}: {task_label}")
+                        print(f"[DEBUG sync_bookings_to_1day_tasks] Created task for {patient_name}: 1-Day Reminder (assigned to {assignee})")
 
                 except Exception as e:
                     error_msg = f"Error syncing booking for {patient_name}: {e}"
@@ -1654,7 +1659,7 @@ class DatabaseManager:
                     result['errors'].append(error_msg)
 
         except Exception as e:
-            error_msg = f"Error in sync_bookings_to_tasks: {e}"
+            error_msg = f"Error in sync_bookings_to_1day_tasks: {e}"
             print(error_msg)
             result['errors'].append(error_msg)
 

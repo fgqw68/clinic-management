@@ -346,7 +346,7 @@ async def force_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Today's bookings (other): {len(debug_info.get('bookings_today_other', []))}\n"
         f"Missed bookings: {len(debug_info.get('bookings_missed', []))}\n"
         f"Pending No Visit tasks: {len(debug_info.get('pending_no_visit_tasks', []))}\n"
-        f"Pending 0-Day Reminder tasks: {len(debug_info.get('pending_today_reminders', []))}\n\n"
+        f"Pending 1-Day Reminder tasks: {len(debug_info.get('pending_today_reminders', []))}\n\n"
         f"Running sync now..."
     )
     await update.message.reply_text(debug_msg)
@@ -1396,19 +1396,6 @@ async def booking_date_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if booking:
             is_update = 'existing_booking' in context.user_data
 
-            # If booking is for today, create a task for confirming availability
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            if booking_date == today_str and not is_update:
-                # Create "0-Day Reminder" task for Nimisha
-                DatabaseManager.create_patient_task(
-                    assignee='Nimisha',
-                    name=name,
-                    phone=phone,
-                    followup_type='0-Day Reminder',
-                    status='Pending',
-                    due_date=today_str
-                )
-
             if is_update:
                 success_message = (
                     f"✅ *Booking Updated Successfully!*\n\n"
@@ -1419,16 +1406,12 @@ async def booking_date_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     f"Use /start to return to the main menu."
                 )
             else:
-                task_created_note = ""
-                if booking_date == today_str:
-                    task_created_note = f"\n📋 Task Created: 0-Day Reminder\n"
                 success_message = (
                     f"✅ *Booking Created Successfully!*\n\n"
                     f"👤 Patient: {name}\n"
                     f"📱 Phone: {phone}\n"
                     f"📅 Booking Date: {format_date(booking_date)}\n"
                     f"👤 Booked By: {booked_by}\n"
-                    f"{task_created_note}"
                     f"\nUse /start to return to the main menu."
                 )
             await update.message.reply_text(success_message, parse_mode='Markdown')
@@ -1521,17 +1504,13 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, task_vi
             message = f"📋 *Your Pending Tasks*\n\n"
 
             # Sort patient tasks by priority
-            # Priority 1: 0-Day Reminder
-            # Priority 2: 3-Day Reminder
-            # Priority 3: 14-Day Reminder
-            # Priority 4: 3-Day Feedback (Post-Visit)
-            # Priority 5: No Visit
+            # Priority 1: 1-Day Reminder
+            # Priority 2: 3-Day Feedback (Post-Visit)
+            # Priority 3: No Visit
             priority_order = {
-                "0-Day Reminder": 1,
-                "3-Day Reminder": 2,
-                "14-Day Reminder": 3,
-                "3-Day Feedback": 4,
-                "No Visit": 5
+                "1-Day Reminder": 1,
+                "3-Day Feedback": 2,
+                "No Visit": 3
             }
 
             # Filter out unplanned tasks from pending_tasks
@@ -1576,9 +1555,7 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, task_vi
 
                         # Get priority icon based on task type
                         priority_icons = {
-                            "0-Day Reminder": "🔴",
-                            "3-Day Reminder": "🟠",
-                            "14-Day Reminder": "🟡",
+                            "1-Day Reminder": "🔴",
                             "3-Day Feedback": "🟢",
                             "No Visit": "🟣"
                         }
@@ -1590,13 +1567,12 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, task_vi
 
                         # Calculate Next Visit Date based on task type
                         next_visit_date = None
-                        if task_type == '0-Day Reminder' and due != 'N/A':
-                            next_visit_date = format_date(due)
-                        elif task_type == '3-Day Reminder' and due != 'N/A':
-                            next_visit_dt = datetime.strptime(due, '%Y-%m-%d') + timedelta(days=3)
-                            next_visit_date = format_date(next_visit_dt.strftime('%Y-%m-%d'))
-                        elif task_type == '14-Day Reminder' and due != 'N/A':
-                            next_visit_dt = datetime.strptime(due, '%Y-%m-%d') + timedelta(days=14)
+                        if task_type == '1-Day Reminder' and due != 'N/A':
+                            # For 1-Day Reminder, next visit is due + 1 day (or + 2 if due is Saturday)
+                            due_dt = datetime.strptime(due, '%Y-%m-%d')
+                            next_visit_dt = due_dt + timedelta(days=1)
+                            if next_visit_dt.weekday() == 6:  # Sunday is 6
+                                next_visit_dt = due_dt + timedelta(days=2)
                             next_visit_date = format_date(next_visit_dt.strftime('%Y-%m-%d'))
 
                         # Build task message with Next Visit Date if applicable
@@ -2747,19 +2723,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 if booking:
                     is_update = 'existing_booking' in context.user_data
 
-                    # If booking is for today, create a task for confirming availability
-                    today_str = datetime.now().strftime('%Y-%m-%d')
-                    if booking_date == today_str and not is_update:
-                        # Create "0-Day Reminder" task for Nimisha
-                        DatabaseManager.create_patient_task(
-                            assignee='Nimisha',
-                            name=name,
-                            phone=phone,
-                            followup_type='0-Day Reminder',
-                            status='Pending',
-                            due_date=today_str
-                        )
-
                     if is_update:
                         success_message = (
                             f"✅ *Booking Updated Successfully!*\n\n"
@@ -3631,42 +3594,28 @@ async def daily_sync_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Clear stale caches to free memory before heavy operations
     DatabaseManager.clear_all_caches()
 
-    # Call 1: Sync today's bookings (0 days)
-    print(f"[{today}] Starting Today's Reminders sync...")
-    result_1 = DatabaseManager.sync_bookings_to_tasks(0, "0-Day Reminder")
-    print(f"[{today}] Today's Reminders - Created: {result_1['tasks_created']}, Skipped: {result_1['tasks_skipped']}")
+    # Call 1: Sync 1-Day Reminder tasks
+    print(f"[{today}] Starting 1-Day Reminders sync...")
+    result_1 = DatabaseManager.sync_bookings_to_1day_tasks()
+    print(f"[{today}] 1-Day Reminders - Created: {result_1['tasks_created']}, Skipped: {result_1['tasks_skipped']}")
     if result_1['errors']:
         print(f"[{today}] Errors: {result_1['errors']}")
 
-    # Call 2: Sync bookings 3 days from now
-    print(f"[{today}] Starting 3-Day Reminders sync...")
-    result_2 = DatabaseManager.sync_bookings_to_tasks(3, "3-Day Reminder")
-    print(f"[{today}] 3-Day Reminders - Created: {result_2['tasks_created']}, Skipped: {result_2['tasks_skipped']}")
+    # Call 2: Sync missed bookings to no-show followup tasks
+    print(f"[{today}] Starting No Visit sync...")
+    result_2 = DatabaseManager.sync_missed_bookings_to_tasks()
+    print(f"[{today}] No Visit - Created: {result_2['tasks_created']}, Skipped: {result_2['tasks_skipped']}")
     if result_2['errors']:
         print(f"[{today}] Errors: {result_2['errors']}")
 
-    # Call 3: Sync bookings 14 days from now
-    print(f"[{today}] Starting 14-Day Reminders sync...")
-    result_3 = DatabaseManager.sync_bookings_to_tasks(14, "14-Day Reminder")
-    print(f"[{today}] 14-Day Reminders - Created: {result_3['tasks_created']}, Skipped: {result_3['tasks_skipped']}")
+    # Call 3: Create daily admin chores for staff
+    print(f"[{today}] Starting Daily Admin Chores sync...")
+    result_3 = DatabaseManager.create_daily_admin_chores()
+    print(f"[{today}] Daily Admin Chores - Created: {result_3['tasks_created']}, Skipped: {result_3['tasks_skipped']}")
     if result_3['errors']:
         print(f"[{today}] Errors: {result_3['errors']}")
 
-    # Call 4: Sync missed bookings to no-show followup tasks
-    print(f"[{today}] Starting No Visit sync...")
-    result_4 = DatabaseManager.sync_missed_bookings_to_tasks()
-    print(f"[{today}] No Visit - Created: {result_4['tasks_created']}, Skipped: {result_4['tasks_skipped']}")
-    if result_4['errors']:
-        print(f"[{today}] Errors: {result_4['errors']}")
-
-    # Call 5: Create daily admin chores for staff
-    print(f"[{today}] Starting Daily Admin Chores sync...")
-    result_5 = DatabaseManager.create_daily_admin_chores()
-    print(f"[{today}] Daily Admin Chores - Created: {result_5['tasks_created']}, Skipped: {result_5['tasks_skipped']}")
-    if result_5['errors']:
-        print(f"[{today}] Errors: {result_5['errors']}")
-
-    total_created = result_1['tasks_created'] + result_2['tasks_created'] + result_3['tasks_created'] + result_4['tasks_created'] + result_5['tasks_created']
+    total_created = result_1['tasks_created'] + result_2['tasks_created'] + result_3['tasks_created']
 
     # Force garbage collection after heavy operations
     gc.collect()
@@ -3674,11 +3623,9 @@ async def daily_sync_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Create summary message
     summary_message = (
         f"📊 *Daily Automation Summary ({today})*\n"
-        f"✅ Today's Reminders: {result_1['tasks_created']}\n"
-        f"✅ 3-Day Reminders: {result_2['tasks_created']}\n"
-        f"✅ 14-Day Reminders: {result_3['tasks_created']}\n"
-        f"✅ No Visit: {result_4['tasks_created']}\n"
-        f"✅ Daily Admin Chores: {result_5['tasks_created']}\n"
+        f"✅ 1-Day Reminders: {result_1['tasks_created']}\n"
+        f"✅ No Visit: {result_2['tasks_created']}\n"
+        f"✅ Daily Admin Chores: {result_3['tasks_created']}\n"
         f"Total tasks created: {total_created}"
     )
 
